@@ -1,0 +1,2 @@
+# EasyTeuk
+Solving Teukolsky equation
