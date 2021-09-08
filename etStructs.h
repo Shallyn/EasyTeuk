@@ -21,11 +21,15 @@
 #define DEFAULT_ETA 1e-3
 
 typedef struct tagCoreParams {
-    REAL8 mass;                 /**< mass of companion 1 */
+    REAL8 mass;
     REAL8 spin;
     REAL8 eta;
     REAL8 step_ratio;
+    INT source_type;
     INT mode;
+    // dump
+    REAL8 rt0;
+    REAL8 theta0;
     char prefix[STR_COMM_SIZE];
 } CoreParams;
 

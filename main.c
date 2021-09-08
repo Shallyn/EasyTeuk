@@ -20,15 +20,16 @@ INT usage(const CHAR *program)
     INT a,c;
     print_err("usage: %s [options]\n", program);
     print_err("\t-h, --help\tprint usage and exit\n");
-    print_err("\t-v VERSION, --version=VERSION\tVersion of code[1]\n\t\t\n");
+    print_err("\t-s SOURCE, --source=SOURCE\n\t\ttype of source terms [0]\n");
+    print_err("\t\t0: sourceless\n");
 
-    print_err("\t-m MASS, --mass=MASS\n\t\tmass of central Kerr BH [%g]\n", DEFAULT_MASS);
-    print_err("\t-s SPIN, --spin=SPIN\n\t\tspin of central Kerr BH [%g]\n", DEFAULT_SPIN);
+    // print_err("\t-m MASS, --mass=MASS\n\t\tmass of central Kerr BH [%g]\n", DEFAULT_MASS);
+    print_err("\t-a SPIN, --spin=SPIN\n\t\tspin of central Kerr BH [%g]\n", DEFAULT_SPIN);
 
     print_err("\t-r MASS-RATIO, --mass-ratio=MASS-RATIO\n\t\tmass ratio between secondary mass and central Kerr BH [%g]\n", DEFAULT_ETA);
 
     print_err("\t-p PREFIX, --prefix=PREFIX\n\t\toutput path [TeukDefault]\n");
-
+    print_err("\t-v VERSION, --version=VERSION\tVersion of code[1]\n\t\t\n");
     print_err("\t-E MODE --mode=MODE        \n\t\tThe output mode.\n");
     print_err("\t-l LOG_LEVEL, --log-level=LOG_LEVEL\n\t\tDebug level for logging [0]\n");
     print_err("\t-o LOG_FILE, --log-file=LOG_FILE\n\t\tWill dump loggings to here.\n");
@@ -43,7 +44,11 @@ CoreParams parseargs(INT argc, CHAR **argv, CtrlParams *ctpms)
     p.spin = DEFAULT_SPIN;
     p.eta = DEFAULT_ETA;
     p.mode = 0;
-    p.step_ratio = 0.9;
+    p.step_ratio = 0.6;
+    p.source_type = 0;
+    p.rt0 = 20.;
+    p.theta0 = CST_PI/4.;
+    p.mode = 0;
     SET_CODE_VERSION(1);
     extern CHAR *EXT_optarg;
     extern INT EXT_optind;
@@ -52,23 +57,22 @@ CoreParams parseargs(INT argc, CHAR **argv, CtrlParams *ctpms)
     strncpy(p.prefix, "TeukDefault", STR_COMM_SIZE);
     OPTION long_options[] = {
         {"help", opt_no_argument, 0, 'h'},
-        {"version", opt_required_argument, 0, 'v'},
 
-        {"mass", opt_required_argument, 0, 'm'},
-        {"spin", opt_required_argument, 0, 's'},
+        {"source", opt_required_argument, 0, 's'},
+        {"spin", opt_required_argument, 0, 'a'},
         {"mass-ratio", opt_required_argument, 0, 'r'},
 
         {"prefix", opt_required_argument , 0, 'p'},
 
         {"mode", opt_required_argument, 0, 'E'},
-
+        {"version", opt_required_argument, 0, 'v'},
         {"log-level", opt_required_argument , 0, 'l'},
         {"log-file", opt_required_argument , 0, 'o'},
         {0, 0, 0, 0}
     };
 
     CHAR args[] =
-    "h:v:m:s:r:p:E:l:o";
+    "h:s:m:a:r:p:E:v:l:o";
     while (1)
     {
         INT option_index = 0;
@@ -92,10 +96,10 @@ CoreParams parseargs(INT argc, CHAR **argv, CtrlParams *ctpms)
             case 'v':
                 SET_CODE_VERSION(atoi(EXT_optarg));
                 break;
-            case 'm':
-                p.mass = atof(EXT_optarg);
-                break;
             case 's':
+                p.source_type = atoi(EXT_optarg);
+                break;
+            case 'a':
                 p.spin = atof(EXT_optarg);
                 break;
             case 'r':
