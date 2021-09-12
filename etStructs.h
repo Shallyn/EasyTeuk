@@ -19,12 +19,16 @@
 #define DEFAULT_MASS 1e6
 #define DEFAULT_SPIN 0.0
 #define DEFAULT_ETA 1e-3
+#define DEFAULT_STEP_RATIO 0.9
+#define DEFAULT_TIME_MAX 500.
 
 typedef struct tagCoreParams {
     REAL8 mass;
     REAL8 spin;
     REAL8 eta;
     REAL8 step_ratio;
+    REAL8 t_max;
+    INT shot_step;
     INT source_type;
     INT mode;
     // dump

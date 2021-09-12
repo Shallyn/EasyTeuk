@@ -49,6 +49,7 @@ typedef struct tagDiscreteGridParams
 }DiscreteGridParams;
 
 static INT compute_Teukolsky_mode(INT modeM, CoreParams *params, DiscreteGridParams *gp);
+static INT compute_Teukolsky_modeV2(INT modeM, CoreParams *params, DiscreteGridParams *gp);
 
 static INT compute_TeukParams(TeukParams *params, INT m, INT s,
                     REAL8 r, REAL8 ang, REAL8 a, REAL8 M);
@@ -89,19 +90,21 @@ INT Solve_Teukolsky_TD(CoreParams *params)
     gp.ang_min = 0.0;
     gp.ang_max = CST_PI;
     gp.t_min = 0.0;
-    gp.t_max = 500.;
+    gp.t_max = params->t_max;
 
     gp.rt_num = 8001;
     gp.ang_num = 33;
-    gp.rt_step = (gp.rt_max - gp.rt_min) / gp.rt_num;
-    gp.ang_step = (gp.ang_max - gp.ang_min) / gp.ang_num;
+    gp.rt_step = (gp.rt_max - gp.rt_min) / (gp.rt_num-1);
+    gp.ang_step = (gp.ang_max - gp.ang_min) / (gp.ang_num-1);
 
     gp.t_step = params->step_ratio*GET_MIN(gp.rt_step, 5.*gp.ang_step);
     gp.t_num = (INT)((gp.t_max - gp.t_min) / gp.t_step);
     INT mm;
     mm = 2;
     PRINT_LOG_INFO(LOG_INFO, "Calculate mode m = %d", mm);
-    status = compute_Teukolsky_mode(mm, params, &gp);
+    // status = compute_Teukolsky_mode(mm, params, &gp);
+    status = compute_Teukolsky_modeV2(mm, params, &gp);
+
     // for (mm=-2; mm < 3; mm++)
     // {
     //     PRINT_LOG_INFO(LOG_INFO, "Calculate mode m = %d", mm);
@@ -183,6 +186,12 @@ static INT compute_Teukolsky_mode(INT modeM, CoreParams *params, DiscreteGridPar
     REAL8Array *buffer = NULL;
     REAL8Array *out = NULL;
 
+    REAL8Array *out_itm = NULL;
+
+    // REAL8Array *rCoord = NULL;
+    REAL8Array *rtCoord = NULL;
+    REAL8Array *angCoord = NULL;
+
     UINT rt_half_num = 2*gp->rt_num - 1;
     // allocate memory
     PRINT_LOG_INFO(LOG_INFO, "[Mode %d]Allocate Memory", modeM);
@@ -207,7 +216,7 @@ static INT compute_Teukolsky_mode(INT modeM, CoreParams *params, DiscreteGridPar
      * @brief Set initial conditions
      * 
      */
-    SetInitConditions_BellPulse(&init, params, gp, 2, modeM, 0, 0.1, 20, 75, 0.01);
+    SetInitConditions_BellPulse(&init, params, gp, 2, modeM, 0, 0.1, 30, 75, 0.01);
     memcpy(uR, init->data, lu_t * sizeof(REAL8));
     memcpy(vR, init->data + lu_t, lu_t * sizeof(REAL8));
     SetExtractFormalism(&out, buffer, params, gp);
@@ -229,16 +238,21 @@ static INT compute_Teukolsky_mode(INT modeM, CoreParams *params, DiscreteGridPar
      */
     PRINT_LOG_INFO(LOG_INFO, "[Mode %d]Set radius coordinates", modeM);
     rHalfCoord = CreateREAL8Array(1, rt_half_num);
+    rtCoord = CreateREAL8Array(1, 2*gp->rt_num-1);
+    angCoord = CreateREAL8Array(1, gp->ang_num);
     REAL8 r_jmh, rt_jmh;
     REAL8 r_j, rt_j;
     REAL8 r_jph, rt_jph;
     for (jr = 0; jr<rt_half_num; jr++ )
     {
         rt_j = gp->rt_min + jr * gp->rt_step/2.;
+        rtCoord->data[jr] = rt_j;
         rHalfCoord->data[jr] = calculate_small_radius_from_tortoise(rt_j, params->spin, 1e-3);
     }
+    for (kf=0;kf<gp->ang_num;kf++)
+        angCoord->data[kf] = gp->ang_min + kf * gp->ang_step;
 
-    REAL8 ang_k;
+    REAL8 ang_k, time_i;
     REAL8 ForceT = 0.0;
     REAL8 bHalf, SHalf;
     REAL8 Lder1_R, Lder2_R, LderTerm_R;
@@ -246,10 +260,13 @@ static INT compute_Teukolsky_mode(INT modeM, CoreParams *params, DiscreteGridPar
     REAL8 duRdrt, duIdrt;
     REAL8 ATerm_jph, ATerm_j, ATerm_jmh;
     INT kp2, kp1, km2, km1;
+    REAL8 time_thresh = 0.;
+    REAL8 time_thresh_step = 5.;
     PRINT_LOG_INFO(LOG_INFO, "[Mode %d]Start iteration", modeM);
     for (it = 0; it < gp->t_num-1; it++)
     {
-        PRINT_LOG_INFO(LOG_INFO, "PROC:%d/%d", it, gp->t_num-1);
+        time_i = gp->t_min + it * gp->t_step;
+        PRINT_LOG_INFO(LOG_INFO, "PROC:time[%d/%d] = %.3f", it, gp->t_num-1, time_i);
         for (jr = 1; jr < rt_half_num-1; jr++)
         {
             // radius
@@ -270,35 +287,17 @@ static INT compute_Teukolsky_mode(INT modeM, CoreParams *params, DiscreteGridPar
                 compute_TeukParams(&tp_rj, modeM, -2, r_j, ang_k, params->spin, 1.);
                 compute_TeukParams(&tp_rjph, modeM, -2, r_jph, ang_k, params->spin, 1.);
                 bHalf = (tp_rjmh.bb + tp_rjph.bb) / 2.;
-                // SHalf = ((vR[kf+(jr+1)*lu_rt] + vR[kf+(jr-1)*lu_rt]) / 2.);
-                SHalf = vR[kf + (jr)*lu_rt];
+                SHalf = (vR[kf + (jr)*lu_rt]+(vR[kf+(jr+1)*lu_rt] + vR[kf+(jr-1)*lu_rt]) / 2.)/2.;
+                // SHalf = vR[kf + (jr)*lu_rt];
                 uR[kf+(jr)*lu_rt+lu_t] = (uR[kf+(jr+1)*lu_rt]+uR[kf+(jr-1)*lu_rt])/2. - 
                     (gp->t_step/2.) * ( bHalf*(uR[kf+(jr+1)*lu_rt] - uR[kf+(jr-1)*lu_rt])/gp->rt_step -
                     SHalf);
-                // SHalf = ((vI[kf+(jr+1)*lu_rt] + vI[kf+(jr-1)*lu_rt]) / 2.);
-                SHalf = vI[kf + (jr)*lu_rt];
+                SHalf = (vI[kf + (jr)*lu_rt]+(vI[kf+(jr+1)*lu_rt] + vI[kf+(jr-1)*lu_rt]) / 2.)/2.;
+                // SHalf = vI[kf + (jr)*lu_rt];
                 uI[kf+(jr)*lu_rt+lu_t] = (uI[kf+(jr+1)*lu_rt]+uI[kf+(jr-1)*lu_rt])/2. - 
                     (gp->t_step/2.) * ( bHalf*(uI[kf+(jr+1)*lu_rt] - uI[kf+(jr-1)*lu_rt])/gp->rt_step -
                     SHalf);
-                // debug
-#if LOCAL_DEBUG
-                if (isnan(uR[kf+(jr)*lu_rt+lu_t]) || isnan(uI[kf+(jr)*lu_rt+lu_t]))
-                {
-                    print_debug("time[%d+1/2], ang[%d+1], r[%d]\n", it, kf, jr);
-                    print_debug("uR = %e\n", uR[kf+(jr)*lu_rt+lu_t]);
-                    print_debug("uI = %e\n", uI[kf+(jr)*lu_rt+lu_t]);
-                    print_debug("vR = %e\n", vR[kf+(jr)*lu_rt+lu_t]);
-                    print_debug("vI = %e\n", vI[kf+(jr)*lu_rt+lu_t]);
-                    print_debug("[j+1]b = %e, r = %e, sigma = %e, sigma2 = %e\n", tp_rj.bb, r_jph, tp_rjph.sigma, tp_rjph.sigma2);
-                    print_debug("last state:(t[%d+0], ang[%d], r[%d]):\n", it, jr, kf); 
-                    print_debug("\t%e, %e, %e, %e\n", uR[kf+(jr)*lu_rt], uI[kf+(jr)*lu_rt], vR[kf+(jr)*lu_rt], vI[kf+(jr)*lu_rt]);
-                    print_debug("last state:(t[%d+0], ang[%d], r[%d+1]):\n", it, jr, kf); 
-                    print_debug("\t%e, %e, %e, %e\n", uR[kf+(jr+1)*lu_rt], uI[kf+(jr+1)*lu_rt], vR[kf+(jr+1)*lu_rt], vI[kf+(jr+1)*lu_rt]);
-                    print_debug("last state:(t[%d+0], ang[%d], r[%d-1]):\n", it, jr, kf); 
-                    print_debug("\t%e, %e, %e, %e\n", uR[kf+(jr-1)*lu_rt], uI[kf+(jr-1)*lu_rt], vR[kf+(jr-1)*lu_rt], vI[kf+(jr-1)*lu_rt]);
-                    goto QUIT;
-                }
-#endif
+
                 // dudtheta
                 km2 = kf==1 ? kf : kf-2;
                 km1 = kf-1;
@@ -329,14 +328,14 @@ static INT compute_Teukolsky_mode(INT modeM, CoreParams *params, DiscreteGridPar
                 duIdrt = (uI[kf+(jr+1)*lu_rt]-uI[kf+(jr-1)*lu_rt])/gp->rt_step;
                 ATerm_jph = (tp_rjph.a31*uR[kf+(jr+1)*lu_rt] +tp_rjph.a32*uI[kf+(jr+1)*lu_rt] + tp_rjph.a33*vR[kf+(jr+1)*lu_rt]+tp_rjph.a34*vI[kf+(jr+1)*lu_rt]);
                 ATerm_jmh = (tp_rjmh.a31*uR[kf+(jr-1)*lu_rt] +tp_rjmh.a32*uI[kf+(jr-1)*lu_rt] + tp_rjmh.a33*vR[kf+(jr-1)*lu_rt]+tp_rjmh.a34*vI[kf+(jr-1)*lu_rt]);
-                ATerm_j = (ATerm_jph + ATerm_jmh)/2.;
-                // ATerm_j = (tp_rj.a31*uR[kf+(jr)*lu_rt] +tp_rj.a32*uI[kf+(jr)*lu_rt] + tp_rj.a33*vR[kf+(jr)*lu_rt]+tp_rj.a34*vI[kf+(jr)*lu_rt]);
+                // ATerm_j = (ATerm_jph + ATerm_jmh)/2.;
+                ATerm_j = (tp_rj.a31*uR[kf+(jr)*lu_rt] +tp_rj.a32*uI[kf+(jr)*lu_rt] + tp_rj.a33*vR[kf+(jr)*lu_rt]+tp_rj.a34*vI[kf+(jr)*lu_rt]);
                 // ATerm_j = ((tp_rjmh.a31+tp_rjph.a31)*uR[kf+(jr)*lu_rt] + 
                 //             (tp_rjmh.a32+tp_rjph.a32)*uI[kf+(jr)*lu_rt] + 
                 //             (tp_rjmh.a33+tp_rjph.a33)*vR[kf+(jr)*lu_rt]+ 
                 //             (tp_rjmh.a34+tp_rjph.a34)*vI[kf+(jr)*lu_rt])/2.;
                 SHalf = ForceT - (tp_rjph.m31+tp_rjmh.m31) * duRdrt/2. - (tp_rjph.m32+tp_rjmh.m32)*duIdrt/2. - LderTerm_R - 
-                    (ATerm_j);
+                    (ATerm_j+(ATerm_jph+ATerm_jmh)/2.)/2.;
                 
                 vR[kf+(jr)*lu_rt+lu_t] = (vR[kf+(jr+1)*lu_rt]+vR[kf+(jr-1)*lu_rt])/2. - 
                     (gp->t_step/2.) * ( (-bHalf)*(vR[kf+(jr+1)*lu_rt] - vR[kf+(jr-1)*lu_rt])/gp->rt_step -
@@ -344,43 +343,17 @@ static INT compute_Teukolsky_mode(INT modeM, CoreParams *params, DiscreteGridPar
 
                 ATerm_jph = (-tp_rjph.a32*uR[kf+(jr+1)*lu_rt] +tp_rjph.a31*uI[kf+(jr+1)*lu_rt] - tp_rjph.a34*vR[kf+(jr+1)*lu_rt]+tp_rjph.a33*vI[kf+(jr+1)*lu_rt]);
                 ATerm_jmh = (-tp_rjmh.a32*uR[kf+(jr-1)*lu_rt] +tp_rjmh.a31*uI[kf+(jr-1)*lu_rt] - tp_rjmh.a34*vR[kf+(jr-1)*lu_rt]+tp_rjmh.a33*vI[kf+(jr-1)*lu_rt]);
-                ATerm_j = (ATerm_jph + ATerm_jmh)/2.;
-                // ATerm_j = (-tp_rj.a32*uR[kf+(jr)*lu_rt] +tp_rj.a31*uI[kf+(jr)*lu_rt] - tp_rj.a34*vR[kf+(jr)*lu_rt]+tp_rj.a33*vI[kf+(jr)*lu_rt]);
+                // ATerm_j = (ATerm_jph + ATerm_jmh)/2.;
+                ATerm_j = (-tp_rj.a32*uR[kf+(jr)*lu_rt] +tp_rj.a31*uI[kf+(jr)*lu_rt] - tp_rj.a34*vR[kf+(jr)*lu_rt]+tp_rj.a33*vI[kf+(jr)*lu_rt]);
                 // ATerm_j = (-(tp_rjmh.a32+tp_rjph.a32)*uR[kf+(jr)*lu_rt] + 
                 //             (tp_rjmh.a31+tp_rjph.a31)*uI[kf+(jr)*lu_rt] - 
                 //             (tp_rjmh.a34+tp_rjph.a34)*vR[kf+(jr)*lu_rt] + 
                 //             (tp_rjmh.a33+tp_rjph.a33)*vI[kf+(jr)*lu_rt])/2.;
                 SHalf = ForceT + (tp_rjph.m32+tp_rjmh.m32) * duRdrt/2. - (tp_rjph.m31+tp_rjmh.m31)*duIdrt/2. - LderTerm_I - 
-                    ATerm_j;
+                    (ATerm_j+(ATerm_jph+ATerm_jmh)/2.)/2.;
                 vI[kf+(jr)*lu_rt+lu_t] = (vI[kf+(jr+1)*lu_rt]+vI[kf+(jr-1)*lu_rt])/2. - 
                     (gp->t_step/2.) * ( (-bHalf)*(vI[kf+(jr+1)*lu_rt] - vI[kf+(jr-1)*lu_rt])/gp->rt_step -
                     SHalf);
-#if LOCAL_DEBUG
-                // debug
-                if (isnan(vR[kf+(jr)*lu_rt+lu_t]) || isnan(vI[kf+(jr)*lu_rt+lu_t]))
-                {
-                    print_debug("time[%d+1/2], ang[%d+1], r[%d]\n", it, kf, jr);
-                    print_debug("uR = %e\n", uR[kf+(jr)*lu_rt+lu_t]);
-                    print_debug("uI = %e\n", uI[kf+(jr)*lu_rt+lu_t]);
-                    print_debug("vR = %e\n", vR[kf+(jr)*lu_rt+lu_t]);
-                    print_debug("vI = %e\n", vI[kf+(jr)*lu_rt+lu_t]);
-                    print_debug("b = %e, rtjph = %e, rjph = %e\n", tp_rjph.bb, rt_jph, r_jph);
-                    print_debug("sigma = %e, sigma2 = %e\n", tp_rjph.sigma, tp_rjph.sigma2);
-                    print_debug("last state:(t[%d+0], ang[%d], r[%d]):\n", it, jr, kf); 
-                    print_debug("\t%e, %e, %e, %e\n", uR[kf+(jr)*lu_rt], uI[kf+(jr)*lu_rt], vR[kf+(jr)*lu_rt], vI[kf+(jr)*lu_rt]);
-                    print_debug("last state:(t[%d+0], ang[%d], r[%d+1]):\n", it, jr, kf); 
-                    print_debug("\t%e, %e, %e, %e\n", uR[kf+(jr+1)*lu_rt], uI[kf+(jr+1)*lu_rt], vR[kf+(jr+1)*lu_rt], vI[kf+(jr+1)*lu_rt]);
-                    print_debug("last state:(t[%d+0], ang[%d], r[%d-1]):\n", it, jr, kf); 
-                    print_debug("\t%e, %e, %e, %e\n", uR[kf+(jr-1)*lu_rt], uI[kf+(jr-1)*lu_rt], vR[kf+(jr-1)*lu_rt], vI[kf+(jr-1)*lu_rt]);
-                    print_debug("duRdrt = %e, duIdrt = %e\n", duRdrt, duIdrt);
-                    print_debug("LderTerm_R = %e\n", LderTerm_R);
-                    print_debug("Source = %e\n", SHalf);
-                    print_debug("m31 = %e, m32 = %e\n", tp_rjph.m31, tp_rjph.m32);
-                    print_debug("a31 = %e, a32 = %e, a33 = %e, a34 = %e\n", tp_rjph.a31, tp_rjph.a32, tp_rjph.a33, tp_rjph.a34);
-                    print_debug("c1 = %e, c2 = %e, c3 = %e\n", tp_rjph.cc1, tp_rjph.cc2, tp_rjph.cc3);
-                    goto QUIT;
-                }
-#endif
             }
             // fix angular boundary conditions
             // we dont need to care about v
@@ -428,36 +401,17 @@ static INT compute_Teukolsky_mode(INT modeM, CoreParams *params, DiscreteGridPar
                 compute_TeukParams(&tp_rj, modeM, -2, r_j, ang_k, params->spin, 1.);
                 compute_TeukParams(&tp_rjph, modeM, -2, r_jph, ang_k, params->spin, 1.);
                 bHalf = (tp_rjmh.bb + tp_rjph.bb)/2.;
-                // SHalf = (vR[kf+(jr-1)*lu_rt+lu_t] + vR[kf+(jr+1)*lu_rt+lu_t]) / 2.;
-                SHalf = vR[kf + (jr)*lu_rt + lu_t];
+                SHalf = (vR[kf + (jr)*lu_rt + lu_t]+(vR[kf+(jr-1)*lu_rt+lu_t] + vR[kf+(jr+1)*lu_rt+lu_t]) / 2.)/2.;
+                // SHalf = vR[kf + (jr)*lu_rt + lu_t];
                 uR[kf+(jr)*lu_rt+2*lu_t] = uR[kf+jr*lu_rt] - 
                     (gp->t_step) * ( bHalf*(uR[kf+(jr+1)*lu_rt+lu_t] - uR[kf+(jr-1)*lu_rt+lu_t])/gp->rt_step -
                     SHalf);
-                // SHalf = (vI[kf+(jr-1)*lu_rt+lu_t] + vI[kf+(jr+1)*lu_rt+lu_t]) / 2.;
-                SHalf = vI[kf + (jr)*lu_rt + lu_t];
+                SHalf = (vI[kf + (jr)*lu_rt + lu_t]+(vI[kf+(jr-1)*lu_rt+lu_t] + vI[kf+(jr+1)*lu_rt+lu_t]) / 2.)/2.;
+                // SHalf = vI[kf + (jr)*lu_rt + lu_t];
                 uI[kf+(jr)*lu_rt+2*lu_t] = uI[kf+jr*lu_rt] - 
                     (gp->t_step) * ( bHalf*(uI[kf+(jr+1)*lu_rt+lu_t] - uI[kf+(jr-1)*lu_rt+lu_t])/gp->rt_step -
                     SHalf);
-#if LOCAL_DEBUG
 
-                // debug
-                if (isnan(uR[kf+(jr)*lu_rt+2*lu_t]) || isnan(uI[kf+(jr)*lu_rt+2*lu_t]))
-                {
-                    print_debug("time[%d+1], ang[%d], r[%d]\n", it, jr, kf);
-                    print_debug("uR = %e\n", uR[kf+(jr)*lu_rt+2*lu_t]);
-                    print_debug("uI = %e\n", uI[kf+(jr)*lu_rt+2*lu_t]);
-                    print_debug("vR = %e\n", vR[kf+(jr)*lu_rt+2*lu_t]);
-                    print_debug("vI = %e\n", vI[kf+(jr)*lu_rt+2*lu_t]);
-                    print_debug("b = %e\n", tp_rj.bb);
-                    print_debug("last state:(t[%d+1/2], ang[%d], r[%d]):\n", it, jr, kf); 
-                    print_debug("\t%e, %e, %e, %e\n", uR[kf+(jr)*lu_rt+lu_t], uI[kf+(jr)*lu_rt+lu_t], vR[kf+(jr)*lu_rt+lu_t], vI[kf+(jr)*lu_rt+lu_t]);
-                    print_debug("last state:(t[%d+1/2], ang[%d], r[%d-1]):\n", it, jr, kf); 
-                    print_debug("\t%e, %e, %e, %e\n", uR[kf+(jr-1)*lu_rt+lu_t], uI[kf+(jr-1)*lu_rt+lu_t], vR[kf+(jr-1)*lu_rt+lu_t], vI[kf+(jr-1)*lu_rt+lu_t]);
-                    print_debug("last state:(t[%d+1/2], ang[%d], r[%d+1]):\n", it, jr, kf); 
-                    print_debug("\t%e, %e, %e, %e\n", uR[kf+(jr+1)*lu_rt+lu_t], uI[kf+(jr+1)*lu_rt+lu_t], vR[kf+(jr+1)*lu_rt+lu_t], vI[kf+(jr+1)*lu_rt+lu_t]);
-                    goto QUIT;
-                }
-#endif
                 // dudtheta
                 km2 = kf==1 ? kf : kf-2;
                 km1 = kf-1;
@@ -488,14 +442,14 @@ static INT compute_Teukolsky_mode(INT modeM, CoreParams *params, DiscreteGridPar
                 // duIdrt = (uI[kf+(jr+1)*lu_rt+lu_t]-uI[kf+(jr-1)*lu_rt+lu_t])/gp->rt_step;
                 ATerm_jph = (tp_rjph.a31*uR[kf+(jr+1)*lu_rt+lu_t] +tp_rjph.a32*uI[kf+(jr+1)*lu_rt+lu_t] + tp_rjph.a33*vR[kf+(jr+1)*lu_rt+lu_t]+tp_rjph.a34*vI[kf+(jr+1)*lu_rt+lu_t]);
                 ATerm_jmh = (tp_rjmh.a31*uR[kf+(jr-1)*lu_rt+lu_t] +tp_rjmh.a32*uI[kf+(jr-1)*lu_rt+lu_t] + tp_rjmh.a33*vR[kf+(jr-1)*lu_rt+lu_t]+tp_rjmh.a34*vI[kf+(jr-1)*lu_rt+lu_t]);
-                ATerm_j = (ATerm_jph + ATerm_jmh)/2.;
-                // ATerm_j = (tp_rj.a31*uR[kf+(jr)*lu_rt+lu_t] +tp_rj.a32*uI[kf+(jr)*lu_rt+lu_t] + tp_rj.a33*vR[kf+(jr)*lu_rt+lu_t]+tp_rj.a34*vI[kf+(jr)*lu_rt+lu_t]);
+                // ATerm_j = (ATerm_jph + ATerm_jmh)/2.;
+                ATerm_j = (tp_rj.a31*uR[kf+(jr)*lu_rt+lu_t] +tp_rj.a32*uI[kf+(jr)*lu_rt+lu_t] + tp_rj.a33*vR[kf+(jr)*lu_rt+lu_t]+tp_rj.a34*vI[kf+(jr)*lu_rt+lu_t]);
                 // ATerm_j = ((tp_rjmh.a31+tp_rjph.a31)*uR[kf+(jr)*lu_rt+lu_t] + 
                 //             (tp_rjmh.a32+tp_rjph.a32)*uI[kf+(jr)*lu_rt+lu_t] + 
                 //             (tp_rjmh.a33+tp_rjph.a33)*vR[kf+(jr)*lu_rt+lu_t]+ 
                 //             (tp_rjmh.a34+tp_rjph.a34)*vI[kf+(jr)*lu_rt+lu_t])/2.;
                 SHalf = ForceT - (tp_rjph.m31+tp_rjmh.m31) * duRdrt/2. - (tp_rjph.m32+tp_rjmh.m32)*duIdrt/2. 
-                - LderTerm_R - ATerm_j;
+                - LderTerm_R - (ATerm_j+(ATerm_jph+ATerm_jmh)/2.)/2.;
                 vR[kf+(jr)*lu_rt+2*lu_t] = vR[kf+(jr)*lu_rt] - 
                     (gp->t_step) * ( (-bHalf)*(vR[kf+(jr+1)*lu_rt+lu_t] - vR[kf+(jr-1)*lu_rt+lu_t])/gp->rt_step -
                     SHalf);
@@ -503,14 +457,14 @@ static INT compute_Teukolsky_mode(INT modeM, CoreParams *params, DiscreteGridPar
                 // l31*uI
                 ATerm_jph = (-tp_rjph.a32*uR[kf+(jr+1)*lu_rt+lu_t] +tp_rjph.a31*uI[kf+(jr+1)*lu_rt+lu_t] - tp_rjph.a34*vR[kf+(jr+1)*lu_rt+lu_t]+tp_rjph.a33*vI[kf+(jr+1)*lu_rt+lu_t]);
                 ATerm_jmh = (-tp_rjmh.a32*uR[kf+(jr-1)*lu_rt+lu_t] +tp_rjmh.a31*uI[kf+(jr-1)*lu_rt+lu_t] - tp_rjmh.a34*vR[kf+(jr-1)*lu_rt+lu_t]+tp_rjmh.a33*vI[kf+(jr-1)*lu_rt+lu_t]);
-                ATerm_j = (ATerm_jph + ATerm_jmh)/2.;
-                // ATerm_j = (-tp_rj.a32*uR[kf+(jr)*lu_rt+lu_t] +tp_rj.a31*uI[kf+(jr)*lu_rt+lu_t] - tp_rj.a34*vR[kf+(jr)*lu_rt+lu_t]+tp_rj.a33*vI[kf+(jr)*lu_rt+lu_t]);
+                // ATerm_j = (ATerm_jph + ATerm_jmh)/2.;
+                ATerm_j = (-tp_rj.a32*uR[kf+(jr)*lu_rt+lu_t] +tp_rj.a31*uI[kf+(jr)*lu_rt+lu_t] - tp_rj.a34*vR[kf+(jr)*lu_rt+lu_t]+tp_rj.a33*vI[kf+(jr)*lu_rt+lu_t]);
                 // ATerm_j = (-(tp_rjmh.a32+tp_rjph.a32)*uR[kf+(jr)*lu_rt+lu_t] + 
                 //             (tp_rjmh.a31+tp_rjph.a31)*uI[kf+(jr)*lu_rt+lu_t] - 
                 //             (tp_rjmh.a34+tp_rjph.a34)*vR[kf+(jr)*lu_rt+lu_t]+ 
                 //             (tp_rjmh.a33+tp_rjph.a33)*vI[kf+(jr)*lu_rt+lu_t])/2.;
                 SHalf = ForceT + (tp_rjph.m32+tp_rjmh.m32) * duRdrt/2. - (tp_rjph.m31+tp_rjmh.m31)*duIdrt/2.
-                     - LderTerm_I - (ATerm_j);
+                     - LderTerm_I - (ATerm_j+(ATerm_jph+ATerm_jmh)/2.)/2.;
                 vI[kf+(jr)*lu_rt+2*lu_t] = vI[kf+(jr)*lu_rt] - 
                     (gp->t_step) * ( (-bHalf)*(vI[kf+(jr+1)*lu_rt+lu_t] - vI[kf+(jr-1)*lu_rt+lu_t])/gp->rt_step -
                     SHalf);
@@ -542,150 +496,18 @@ static INT compute_Teukolsky_mode(INT modeM, CoreParams *params, DiscreteGridPar
             vI[kf + (rt_half_num-1)*lu_rt + 2*lu_t] = 0.0;
         }
 
-#if LOCAL_DEBUG
-        // debug
-        if (it == 800)
-        {
-            print_debug("it = %d\n", it);
-            REAL8 dbg_uR, dbg_uI, dbg_vR, dbg_vI;
-            jr = 1706;
-            kf = 1;
-            ang_k = gp->ang_min + kf * gp->ang_step;
-            rt_jmh = gp->rt_min + (-1.+jr)*gp->rt_step/2.;
-            r_jmh = rHalfCoord->data[jr-1];
-            rt_j = gp->rt_min + jr*gp->rt_step/2.;
-            r_j = rHalfCoord->data[jr];
-            rt_jph = gp->rt_min + (1.+jr)*gp->rt_step/2.;
-            r_jph = rHalfCoord->data[jr+1];
-            print_debug("ang = %e\n", ang_k);
-            print_debug("rt = (%e, %e, %e)\n", rt_jmh, rt_j, rt_jph);
-            print_debug("r = (%e, %e, %e)\n", r_jmh, r_j, r_jph);
-
-            compute_TeukParams(&tp_rjmh, modeM, -2, r_jmh, ang_k, params->spin, 1.);
-            compute_TeukParams(&tp_rj, modeM, -2, r_j, ang_k, params->spin, 1.);
-            compute_TeukParams(&tp_rjph, modeM, -2, r_jph, ang_k, params->spin, 1.);
-            print_debug("b = (%e, %e, %e)\n", tp_rjmh.bb, tp_rj.bb, tp_rjph.bb);
-            print_debug("m31 = (%e, %e, %e)\n", tp_rjmh.m31, tp_rj.m31, tp_rjph.m31);
-            print_debug("m32 = (%e, %e, %e)\n", tp_rjmh.m32, tp_rj.m32, tp_rjph.m32);
-            print_debug("a31 = (%e, %e, %e)\n", tp_rjmh.a31, tp_rj.a31, tp_rjph.a31);
-            print_debug("a32 = (%e, %e, %e)\n", tp_rjmh.a32, tp_rj.a32, tp_rjph.a32);
-            print_debug("a33 = (%e, %e, %e)\n", tp_rjmh.a33, tp_rj.a33, tp_rjph.a33);
-            print_debug("a34 = (%e, %e, %e)\n", tp_rjmh.a34, tp_rj.a34, tp_rjph.a34);
-            print_debug("uR_k = (%e, %e, %e)\n", uR[kf-1+(jr)*lu_rt+lu_t], uR[kf+(jr)*lu_rt+lu_t], uR[kf+1+(jr)*lu_rt+lu_t]);
-            print_debug("uI_k = (%e, %e, %e)\n", uI[kf-1+(jr)*lu_rt+lu_t], uI[kf+(jr)*lu_rt+lu_t], uI[kf+1+(jr)*lu_rt+lu_t]);
-            print_debug("vR_k = (%e, %e, %e)\n", vR[kf-1+(jr)*lu_rt+lu_t], vR[kf+(jr)*lu_rt+lu_t], vR[kf+1+(jr)*lu_rt+lu_t]);
-            print_debug("vI_k = (%e, %e, %e)\n", vI[kf-1+(jr)*lu_rt+lu_t], vI[kf+(jr)*lu_rt+lu_t], vI[kf+1+(jr)*lu_rt+lu_t]);
-            print_debug("\n");
-            print_debug("uR_k_i0 = (%e, %e, %e)\n", uR[kf-1+(jr)*lu_rt], uR[kf+(jr)*lu_rt], uR[kf+1+(jr)*lu_rt]);
-            print_debug("uI_k_i0 = (%e, %e, %e)\n", uI[kf-1+(jr)*lu_rt], uI[kf+(jr)*lu_rt], uI[kf+1+(jr)*lu_rt]);
-            print_debug("vR_k_i0 = (%e, %e, %e)\n", vR[kf-1+(jr)*lu_rt], vR[kf+(jr)*lu_rt], vR[kf+1+(jr)*lu_rt]);
-            print_debug("vI_k_i0 = (%e, %e, %e)\n", vI[kf-1+(jr)*lu_rt], vI[kf+(jr)*lu_rt], vI[kf+1+(jr)*lu_rt]);
-
-            print_debug("\n");
-            print_debug("uR_j = (%e, %e, %e)\n", uR[kf+(jr-1)*lu_rt+lu_t], uR[kf+(jr)*lu_rt+lu_t], uR[kf+(jr+1)*lu_rt+lu_t]);
-            print_debug("uI_j = (%e, %e, %e)\n", uI[kf+(jr-1)*lu_rt+lu_t], uI[kf+(jr)*lu_rt+lu_t], uI[kf+(jr+1)*lu_rt+lu_t]);
-            print_debug("vR_j = (%e, %e, %e)\n", vR[kf+(jr-1)*lu_rt+lu_t], vR[kf+(jr)*lu_rt+lu_t], vR[kf+(jr+1)*lu_rt+lu_t]);
-            print_debug("vI_j = (%e, %e, %e)\n", vI[kf+(jr-1)*lu_rt+lu_t], vI[kf+(jr)*lu_rt+lu_t], vI[kf+(jr+1)*lu_rt+lu_t]);
-
-            print_debug("\n");
-            print_debug("uR_j_i0 = (%e, %e, %e)\n", uR[kf+(jr-1)*lu_rt], uR[kf+(jr)*lu_rt], uR[kf+(jr+1)*lu_rt]);
-            print_debug("uI_j_i0 = (%e, %e, %e)\n", uI[kf+(jr-1)*lu_rt], uI[kf+(jr)*lu_rt], uI[kf+(jr+1)*lu_rt]);
-            print_debug("vR_j_i0 = (%e, %e, %e)\n", vR[kf+(jr-1)*lu_rt], vR[kf+(jr)*lu_rt], vR[kf+(jr+1)*lu_rt]);
-            print_debug("vI_j_i0 = (%e, %e, %e)\n", vI[kf+(jr-1)*lu_rt], vI[kf+(jr)*lu_rt], vI[kf+(jr+1)*lu_rt]);
-
-            bHalf = (tp_rjmh.bb + tp_rjph.bb)/2.;
-            SHalf = (vR[kf+(jr-1)*lu_rt+lu_t] + vR[kf+(jr+1)*lu_rt+lu_t]) / 2.;
-            print_debug("S_uR = (%e, %e, %e)\n", vR[kf+(jr-1)*lu_rt+lu_t], vR[kf+(jr+1)*lu_rt+lu_t], SHalf);
-            dbg_uR = uR[kf+jr*lu_rt] - 
-                (gp->t_step) * ( bHalf*(uR[kf+(jr+1)*lu_rt+lu_t] - uR[kf+(jr-1)*lu_rt+lu_t])/gp->rt_step -
-                SHalf);
-            print_debug("dbg_uR = %e\n", dbg_uR);
-            SHalf = (vI[kf+(jr-1)*lu_rt+lu_t] + vI[kf+(jr+1)*lu_rt+lu_t]) / 2.;
-            print_debug("S_uI = (%e, %e, %e)\n", vI[kf+(jr-1)*lu_rt+lu_t], vI[kf+(jr+1)*lu_rt+lu_t], SHalf);
-            dbg_uI = uI[kf+jr*lu_rt] - 
-                (gp->t_step) * ( bHalf*(uI[kf+(jr+1)*lu_rt+lu_t] - uI[kf+(jr-1)*lu_rt+lu_t])/gp->rt_step -
-                SHalf);
-            print_debug("dbg_uI = %e\n", dbg_uI);
-
-            // dudtheta
-                km2 = kf==1 ? kf : kf-2;
-                km1 = kf-1;
-                kp1 = kf+1;
-                kp2 = kf==gp->ang_num-2 ? kf : kf+2;
-                Lder1_R = (uR[km2 + (jr)*lu_rt+lu_t]-uR[kp2 + (jr)*lu_rt+lu_t] + 8.*(uR[kp1+(jr)*lu_rt+lu_t] - uR[km1+(jr)*lu_rt+lu_t]))/12./gp->ang_step;
-                Lder2_R = (-uR[kp2+(jr)*lu_rt+lu_t]-uR[km2 + (jr)*lu_rt+lu_t] +16.*(uR[km1+(jr)*lu_rt+lu_t]+uR[kp1+(jr)*lu_rt+lu_t])-30*uR[kf+(jr)*lu_rt+lu_t])/12./gp->ang_step/gp->ang_step;
-                Lder1_I = (uI[km2 + (jr)*lu_rt+lu_t]-uI[kp2 + (jr)*lu_rt+lu_t] + 8.*(uI[kp1+(jr)*lu_rt+lu_t] - uI[km1+(jr)*lu_rt+lu_t]))/12./gp->ang_step;
-                Lder2_I = (-uI[kp2+(jr)*lu_rt+lu_t]-uI[km2 + (jr)*lu_rt+lu_t] +16.*(uI[km1+(jr)*lu_rt+lu_t]+uI[kp1+(jr)*lu_rt+lu_t])-30*uI[kf+(jr)*lu_rt+lu_t])/12./gp->ang_step/gp->ang_step;
-            // l31 uR
-            LderTerm_R = (tp_rjmh.lder1+tp_rjph.lder1) * Lder1_R/2. + (tp_rjmh.lder2+tp_rjph.lder2) * Lder2_R/2.;
-            // l31 uI
-            LderTerm_I = (tp_rjmh.lder1+tp_rjph.lder1) * Lder1_I/2. + (tp_rjmh.lder2+tp_rjph.lder2) * Lder2_I/2.;
-            print_debug("LderTerm_R,I = (%e, %e)\n", LderTerm_R, LderTerm_I);
-            print_debug("Lder1_R,I = (%e, %e)\n", Lder1_R, Lder1_I);
-            print_debug("Lder2_R,I = (%e, %e)\n", Lder2_R, Lder2_I);
-            // duR/drt
-            duRdrt = (uR[kf+(jr+1)*lu_rt+lu_t]-uR[kf+(jr-1)*lu_rt+lu_t])/gp->rt_step;
-            // duI/drt
-            duIdrt = (uI[kf+(jr+1)*lu_rt+lu_t]-uI[kf+(jr-1)*lu_rt+lu_t])/gp->rt_step;
-            print_debug("duRdrt = %e, duIdrt = %e\n", duRdrt, duIdrt);
-            ATerm_jph = (tp_rjph.a31*uR[kf+(jr+1)*lu_rt+lu_t] +tp_rjph.a32*uI[kf+(jr+1)*lu_rt+lu_t] + tp_rjph.a33*vR[kf+(jr+1)*lu_rt+lu_t]+tp_rjph.a34*vI[kf+(jr+1)*lu_rt+lu_t]);
-            ATerm_jmh = (tp_rjmh.a31*uR[kf+(jr-1)*lu_rt+lu_t] +tp_rjmh.a32*uI[kf+(jr-1)*lu_rt+lu_t] + tp_rjmh.a33*vR[kf+(jr-1)*lu_rt+lu_t]+tp_rjmh.a34*vI[kf+(jr-1)*lu_rt+lu_t]);
-                ATerm_j = ((tp_rjmh.a31+tp_rjph.a31)*uR[kf+(jr)*lu_rt+lu_t] + 
-                            (tp_rjmh.a32+tp_rjph.a32)*uI[kf+(jr)*lu_rt+lu_t] + 
-                            (tp_rjmh.a33+tp_rjph.a33)*vR[kf+(jr)*lu_rt+lu_t]+ 
-                            (tp_rjmh.a34+tp_rjph.a34)*vI[kf+(jr)*lu_rt+lu_t])/2.;
-            print_debug("ATerm_vR = (%e, %e, %e)\n", ATerm_jmh, ATerm_j, ATerm_jph);
-            SHalf = ForceT - (tp_rjph.m31+tp_rjmh.m31) * duRdrt/2. - (tp_rjph.m32+tp_rjmh.m32)*duIdrt/2. - LderTerm_R - 
-                (ATerm_j + (ATerm_jph + ATerm_jmh)/2.)/2.;
-            print_debug("S_vR = %e\n", SHalf);
-
-            dbg_vR = vR[kf+(jr)*lu_rt] - 
-                (gp->t_step) * ( (-bHalf)*(vR[kf+(jr+1)*lu_rt+lu_t] - vR[kf+(jr-1)*lu_rt+lu_t])/gp->rt_step -
-                SHalf);
-            print_debug("dbg_vR = %e\n", dbg_vR);
-
-            // l31*uI
-            ATerm_jph = (-tp_rjph.a32*uR[kf+(jr+1)*lu_rt+lu_t] +tp_rjph.a31*uI[kf+(jr+1)*lu_rt+lu_t] - tp_rjph.a34*vR[kf+(jr+1)*lu_rt+lu_t]+tp_rjph.a33*vI[kf+(jr+1)*lu_rt+lu_t]);
-            ATerm_jmh = (-tp_rjmh.a32*uR[kf+(jr-1)*lu_rt+lu_t] +tp_rjmh.a31*uI[kf+(jr-1)*lu_rt+lu_t] - tp_rjmh.a34*vR[kf+(jr-1)*lu_rt+lu_t]+tp_rjmh.a33*vI[kf+(jr-1)*lu_rt+lu_t]);
-                ATerm_j = (-(tp_rjmh.a32+tp_rjph.a32)*uR[kf+(jr)*lu_rt+lu_t] + 
-                            (tp_rjmh.a31+tp_rjph.a31)*uI[kf+(jr)*lu_rt+lu_t] - 
-                            (tp_rjmh.a34+tp_rjph.a34)*vR[kf+(jr)*lu_rt+lu_t]+ 
-                            (tp_rjmh.a33+tp_rjph.a33)*vI[kf+(jr)*lu_rt+lu_t])/2.;
-
-            print_debug("ATerm_vI = (%e, %e, %e)\n", ATerm_jmh, ATerm_j, ATerm_jph);
-            SHalf = ForceT + (tp_rjph.m32+tp_rjmh.m32) * duRdrt/2. - (tp_rjph.m31+tp_rjmh.m31)*duIdrt/2. - LderTerm_I - 
-                (ATerm_j + (ATerm_jph+ATerm_jmh)/2.)/2.;
-            print_debug("S_vI = %e\n", SHalf);
-            dbg_vI = vI[kf+(jr)*lu_rt] - 
-                (gp->t_step) * ( (-bHalf)*(vI[kf+(jr+1)*lu_rt+lu_t] - vI[kf+(jr-1)*lu_rt+lu_t])/gp->rt_step -
-                SHalf);
-            print_debug("dbg_vI = %e\n", dbg_vI);
-            INT iit;
-            REAL8Array *rCoord = CreateREAL8Array(1, 2*gp->rt_num-1);
-            REAL8Array *rtCoord = CreateREAL8Array(1, 2*gp->rt_num-1);
-            REAL8Array *angCoord = CreateREAL8Array(1, gp->ang_num);
-            for (iit=0;iit<2*gp->rt_num-1;iit++)
-            {
-                rtCoord->data[iit] = gp->rt_min + iit * gp->rt_step/2.;
-                // rCoord->data[it] = rHalfCoord->data[2*it];
-                rCoord->data[iit] = calculate_small_radius_from_tortoise(rtCoord->data[iit], params->spin, 1e-3);
-            }
-            for (iit=0;iit<gp->ang_num;iit++)
-                angCoord->data[iit] = gp->ang_min + iit * gp->ang_step;
-
-            sprintf(fsave, "%s/debug_mode_%d.h5", params->prefix, modeM);
-            DumpREAL8ArrayTohdf5(fsave, "data", buffer, 1);
-            DumpREAL8ArrayTohdf5(fsave, "radius", rCoord, 0);
-            DumpREAL8ArrayTohdf5(fsave, "tortoise_radius", rtCoord, 0);
-            DumpREAL8ArrayTohdf5(fsave, "azimuth", angCoord, 0);
-            STRUCTFREE(rCoord, REAL8Array);
-            STRUCTFREE(rtCoord, REAL8Array);
-            STRUCTFREE(angCoord, REAL8Array);
-            goto QUIT;
-        }
-#endif
         // copy uR, uI to out array
         ExtractTeuk(out, buffer, params, gp, it);
+        if (time_i > time_thresh)
+        {
+            sprintf(fsave, "%s/status_time_mode%d_%d.h5", params->prefix, modeM, (INT)time_thresh);
+            PRINT_LOG_INFO(LOG_INFO, "Dump to %s\n", fsave);
+            DumpREAL8ArrayTohdf5(fsave, "data", buffer, 1);
+            DumpREAL8ArrayTohdf5(fsave, "radius", rHalfCoord, 0);
+            DumpREAL8ArrayTohdf5(fsave, "tortoise_radius", rtCoord, 0);
+            DumpREAL8ArrayTohdf5(fsave, "azimuth", angCoord, 0);
+            time_thresh += time_thresh_step;
+        }
         // for (jr=0; jr < gp->rt_num; jr++)
         // {
         //     for (kf=0; kf < gp->ang_num; kf++)
@@ -725,9 +547,8 @@ QUIT:
     STRUCTFREE(buffer, REAL8Array);
     STRUCTFREE(rHalfCoord, REAL8Array);
     // STRUCTFREE(rCoord, REAL8Array);
-    // STRUCTFREE(rtCoord, REAL8Array);
-    // STRUCTFREE(tCoord, REAL8Array);
-    // STRUCTFREE(angCoord, REAL8Array);
+    STRUCTFREE(rtCoord, REAL8Array);
+    STRUCTFREE(angCoord, REAL8Array);
     STRUCTFREE(init, REAL8Array);
     return CEV_SUCCESS;
 }
@@ -852,8 +673,8 @@ static INT SetInitConditions_BellPulse(REAL8Array **init, CoreParams *cp, Discre
         {
             ang = gp->ang_min + j*gp->ang_step;
             s_ang2 = pow(GET_SIN(ang), 2.);
-            SpinWeightedSphericalHarmonic(ang, 0.0, -2, modeL, modeM, &swY);
-            Y = C_REAL(swY);
+            // SpinWeightedSphericalHarmonic(ang, 0.0, -2, modeL, modeM, &swY);
+            Y = s_ang2;
             // Y = 1.;
             sig2 = pow(r2+a2, 2.) - a2*delta*s_ang2;
             bb = (r2+a2) / sqrt(sig2);
@@ -1037,5 +858,375 @@ static INT DumpTeuk(REAL8Array *out, CoreParams *p, DiscreteGridParams *gp, INT 
     STRUCTFREE(rCoord, REAL8Array);
     STRUCTFREE(rtCoord, REAL8Array);
     STRUCTFREE(angCoord, REAL8Array);
+    return CEV_SUCCESS;
+}
+
+/* ------------------------------------------------------------------------ */
+/*                                                                          */
+/*                                                                          */
+/*                                 Version 2                                */
+/*                                                                          */
+/*                                                                          */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * @brief Compute
+ * 
+ * @param modeM 
+ * @param params 
+ * @param gp 
+ * @return INT 
+ */
+static INT compute_Teukolsky_modeV2(INT modeM, CoreParams *params, DiscreteGridParams *gp)
+{
+    register UINT it, jr, kf;
+    CHAR fsave[STR_COMM_SIZE]; // used for debug
+
+    REAL8Array *buffer = NULL;
+    REAL8Array *inter = NULL;
+
+    REAL8Array *tCoord = NULL;
+    REAL8Array *rtCoord = NULL;
+    REAL8Array *rCoord = NULL;
+    REAL8Array *rphCoord = NULL;
+    REAL8Array *fCoord = NULL;
+
+    REAL8Array *out = NULL;
+
+    UINT rt_len, t_len, f_len;
+    UINT rti_len;
+
+    t_len = gp->t_num;
+    rt_len = gp->rt_num;
+    f_len = gp->ang_num;
+    rti_len = gp->rt_num-1;
+
+    REAL8 t_step, rt_step, f_step;
+    t_step = gp->t_step;
+    rt_step = gp->rt_step;
+    f_step = gp->ang_step;
+
+    // allocate memories
+    PRINT_LOG_INFO(LOG_INFO, "allocate memories");
+    buffer = CreateREAL8Array(4, 4, 2, rt_len, f_len);
+    inter = CreateREAL8Array(3, 4, rti_len, f_len);
+    tCoord = CreateREAL8Array(1, t_len);
+    rtCoord = CreateREAL8Array(1, rt_len);
+    rCoord = CreateREAL8Array(1, rt_len);
+    rphCoord = CreateREAL8Array(1, rti_len);
+    fCoord = CreateREAL8Array(1, f_len);
+    // set pointers
+    UINT g_rt = f_len;
+    UINT g_t = g_rt * rt_len;
+    UINT g_u = g_t * 2;
+    UINT gi_u = g_rt * rti_len;
+        // solution vector: {uR, uI, vR, vI}
+        // the detail definetion see PhysRevD.53.3395
+    REAL8 *uR0, *uI0, *vR0, *vI0;
+    REAL8 *uR1, *uI1, *vR1, *vI1;
+    REAL8 *uRi, *uIi, *vRi, *vIi;
+
+    PRINT_LOG_INFO(LOG_INFO, "set pointers");
+    uR0 = buffer->data;
+    uI0 = uR0 + g_u;
+    vR0 = uI0 + g_u;
+    vI0 = vR0 + g_u;
+    uR1 = uR0 + g_t;
+    uI1 = uR1 + g_u;
+    vR1 = uI1 + g_u;
+    vI1 = vR1 + g_u;
+    uRi = inter->data;
+    uIi = uRi + gi_u;
+    vRi = uIi + gi_u;
+    vIi = vRi + gi_u;
+
+    // init
+    memset(buffer->data, 0, buffer->size * sizeof(REAL8));
+    memset(inter->data, 0, inter->size * sizeof(REAL8));
+
+    PRINT_LOG_INFO(LOG_INFO, "init coordinates");
+    for (it=0; it < t_len; it++)
+        tCoord->data[it] = gp->t_min + t_step * it;
+    for (jr=0; jr < rt_len; jr++)
+    {
+        rtCoord->data[jr] = gp->rt_min + rt_step * jr;
+        rCoord->data[jr] = calculate_small_radius_from_tortoise(rtCoord->data[jr], params->spin, 1e-3);
+        if (jr < rt_len-1)
+            rphCoord->data[jr] = calculate_small_radius_from_tortoise(rtCoord->data[jr] + rt_step/2., params->spin, 1e-3);
+    }
+    for (kf=0; kf < f_len; kf++)
+        fCoord->data[kf] = gp->ang_min + f_step * kf;
+
+
+    // set initial conditions
+    PRINT_LOG_INFO(LOG_INFO, "set initial conditions");
+    TeukParams tp_j0, tp_jh, tp_j1;
+    REAL8 r_j0, r_jh, r_j1;
+    REAL8 f_k;
+    if (params->source_type == 0)
+    {
+        REAL8 Y, s_ang2, rt;
+        COMPLEX16 swY;
+        REAL8 width = 30;
+        REAL8 r0 = 75;
+        REAL8 mag = 0.1;
+        REAL8 v0 = 0.01;
+        for (jr=0; jr<rt_len; jr++)
+        {
+            r_j0 = rCoord->data[jr];
+            rt = rtCoord->data[jr];
+            for(kf=0; kf<f_len; kf++)
+            {
+                f_k = fCoord->data[kf];
+                compute_TeukParams(&tp_j0, modeM, -2, r_j0, f_k, params->spin, 1.);
+                s_ang2 = pow(GET_SIN(f_k), 2.);
+                // SpinWeightedSphericalHarmonic(ang, 0.0, -2, modeL, modeM, &swY);
+                Y = s_ang2;
+                // Y = 1.;
+                uR0[kf + jr*g_rt] = mag*exp(-pow((rt-r0)/width, 2.)) * Y;
+                vR0[kf + jr*g_rt] = mag*2*uR0[kf + jr*g_rt]*(r0-rt)*(tp_j0.bb-v0)*Y/width/width;
+            }
+        }
+    }
+    // output setting
+    out = CreateREAL8Array(2, 2, t_len);
+    REAL8 *uOutR, *uOutI;
+    uOutR = out->data;
+    uOutI = uOutR + t_len;
+    UINT iout_rt = (UINT)((params->rt0 - gp->rt_min) / rt_step);
+    UINT iout_f = (UINT)((params->theta0 - gp->ang_min) / f_step);
+    uOutR[0] = uR0[iout_f + iout_rt * g_rt];
+    uOutI[0] = uI0[iout_f + iout_rt * g_rt];
+    // start evolution
+    REAL8 time_i;
+    INT time_thresh = 0, time_thresh_step = params->shot_step;
+    INT kp2, kp1, km2, km1; // used for differencing
+    REAL8 Lder1_0, Lder2_0, Lder1_1, Lder2_1;
+    REAL8 duRdrt, duIdrt;
+    REAL8 TTerm, DTerm, MTerm, ATerm, LTerm, STerm;
+    PRINT_LOG_INFO(LOG_INFO, "start evolution");
+    for (it = 1; it < t_len; it++)
+    {
+        time_i = tCoord->data[it];
+        PRINT_LOG_INFO(LOG_INFO, "PROC:Mode%d, time[%d/%d] = %.3f", modeM, it, t_len-1, time_i);
+        // step 1, calculate intermediate fields
+        for (jr=0; jr<rti_len; jr++)
+        {
+            r_j0 = rCoord->data[jr];
+            // r_jh = rphCoord->data[jr];
+            r_j1 = rCoord->data[jr+1];
+            for (kf=1; kf < f_len-1; kf++)
+            {
+                f_k = fCoord->data[kf];
+                compute_TeukParams(&tp_j0, modeM, -2, r_j0, f_k, params->spin, 1.);
+                // compute_TeukParams(&tp_jh, modeM, -2, r_jh, f_k, params->spin, 1.);
+                compute_TeukParams(&tp_j1, modeM, -2, r_j1, f_k, params->spin, 1.);
+                DTerm = (tp_j0.bb + tp_j1.bb)/2.;
+                STerm = (vR0[kf + (jr)*g_rt] + vR0[kf + (jr+1)*g_rt])/2.;
+                uRi[kf+(jr)*g_rt] = (uR0[kf+(jr)*g_rt]+uR0[kf+(jr+1)*g_rt])/2. - 
+                    (t_step/2.) * ( DTerm*(uR0[kf+(jr+1)*g_rt] - uR0[kf+(jr)*g_rt])/rt_step -
+                    STerm);
+                
+                STerm = (vI0[kf + (jr)*g_rt] + vI0[kf + (jr+1)*g_rt])/2.;
+                uIi[kf+(jr)*g_rt] = (uI0[kf+(jr)*g_rt]+uI0[kf+(jr+1)*g_rt])/2. -
+                    (t_step/2.) * (DTerm*(uI0[kf+(jr+1)*g_rt] - uI0[kf+(jr)*g_rt])/rt_step -
+                    STerm);
+
+                // dudtheta
+                duRdrt = (uR0[kf+(jr+1)*g_rt] - uR0[kf+(jr)*g_rt])/rt_step;
+                duIdrt = (uI0[kf+(jr+1)*g_rt] - uI0[kf+(jr)*g_rt])/rt_step;
+
+                km2 = kf==1 ? kf : kf-2;
+                km1 = kf-1;
+                kp1 = kf+1;
+                kp2 = kf==f_len-2 ? kf : kf+2;
+
+                // inter vR
+                Lder1_0 = (uR0[km2+(jr)*g_rt]-uR0[kp2+(jr)*g_rt] + 8.*(uR0[kp1+(jr)*g_rt]-uR0[km1+(jr)*g_rt]))/12./f_step;
+                Lder2_0 = (-uR0[kp2+(jr)*g_rt]-uR0[km2+(jr)*g_rt] +16.*(uR0[km1+(jr)*g_rt]+uR0[kp1+(jr)*g_rt])-30*uR0[kf+(jr)*g_rt])/12./f_step/f_step;
+                Lder1_1 = (uR0[km2+(jr+1)*g_rt]-uR0[kp2+(jr+1)*g_rt] + 8.*(uR0[kp1+(jr+1)*g_rt]-uR0[km1+(jr+1)*g_rt]))/12./f_step;
+                Lder2_1 = (-uR0[kp2+(jr+1)*g_rt]-uR0[km2+(jr+1)*g_rt] +16.*(uR0[km1+(jr+1)*g_rt]+uR0[kp1+(jr+1)*g_rt])-30*uR0[kf+(jr+1)*g_rt])/12./f_step/f_step;
+
+                TTerm = 0.0; //sourceless
+                LTerm = (tp_j0.lder1*Lder1_0 + tp_j1.lder1*Lder1_1)/2. + 
+                    (tp_j0.lder2*Lder2_0 + tp_j1.lder2*Lder2_1)/2.;
+                MTerm = (tp_j0.m31+tp_j1.m31) * duRdrt/2. + (tp_j0.m32+tp_j1.m32)*duIdrt/2.;
+                ATerm = ((tp_j0.a31*uR0[kf+(jr)*g_rt]+tp_j1.a31*uR0[kf+(jr+1)*g_rt]) + 
+                        (tp_j0.a32*uI0[kf+(jr)*g_rt]+tp_j1.a32*uI0[kf+(jr+1)*g_rt]) + 
+                        (tp_j0.a33*vR0[kf+(jr)*g_rt]+tp_j1.a33*vR0[kf+(jr+1)*g_rt]) + 
+                        (tp_j0.a34*vI0[kf+(jr)*g_rt]+tp_j1.a34*vI0[kf+(jr+1)*g_rt]))/2.;
+                STerm = TTerm - MTerm - LTerm - ATerm;
+                vRi[kf+(jr)*g_rt] = (vR0[kf+(jr)*g_rt] + vR0[kf+(jr+1)*g_rt])/2. - 
+                    (t_step/2.) * ((-DTerm)*(vR0[kf+(jr+1)*g_rt] - vR0[kf+(jr)*g_rt])/rt_step -
+                    STerm);
+
+                // inter vI
+                Lder1_0 = (uI0[km2+(jr)*g_rt]-uI0[kp2+(jr)*g_rt] + 8.*(uI0[kp1+(jr)*g_rt]-uI0[km1+(jr)*g_rt]))/12./f_step;
+                Lder2_0 = (-uI0[kp2+(jr)*g_rt]-uI0[km2+(jr)*g_rt] +16.*(uI0[km1+(jr)*g_rt]+uI0[kp1+(jr)*g_rt])-30*uI0[kf+(jr)*g_rt])/12./f_step/f_step;
+                Lder1_1 = (uI0[km2+(jr+1)*g_rt]-uI0[kp2+(jr+1)*g_rt] + 8.*(uI0[kp1+(jr+1)*g_rt]-uI0[km1+(jr+1)*g_rt]))/12./f_step;
+                Lder2_1 = (-uI0[kp2+(jr+1)*g_rt]-uI0[km2+(jr+1)*g_rt] +16.*(uI0[km1+(jr+1)*g_rt]+uI0[kp1+(jr+1)*g_rt])-30*uI0[kf+(jr+1)*g_rt])/12./f_step/f_step;
+
+                TTerm = 0.0; //sourceless
+                LTerm = (tp_j0.lder1*Lder1_0 + tp_j1.lder1*Lder1_1)/2. + 
+                    (tp_j0.lder2*Lder2_0 + tp_j1.lder2*Lder2_1)/2.;
+                MTerm = -(tp_j0.m32+tp_j1.m32) * duRdrt/2. + (tp_j0.m31+tp_j1.m31)*duIdrt/2.;
+                ATerm = (-(tp_j0.a32*uR0[kf+(jr)*g_rt]+tp_j1.a32*uR0[kf+(jr+1)*g_rt]) + 
+                        (tp_j0.a31*uI0[kf+(jr)*g_rt]+tp_j1.a31*uI0[kf+(jr+1)*g_rt]) - 
+                        (tp_j0.a34*vR0[kf+(jr)*g_rt]+tp_j1.a34*vR0[kf+(jr+1)*g_rt])+ 
+                        (tp_j0.a33*vI0[kf+(jr)*g_rt]+tp_j1.a33*vI0[kf+(jr+1)*g_rt]))/2.;
+                STerm = TTerm - MTerm - LTerm - ATerm;
+                vIi[kf+(jr)*g_rt] = (vI0[kf+(jr)*g_rt] + vI0[kf+(jr+1)*g_rt])/2. - 
+                    (t_step/2.) * ((-DTerm)*(vI0[kf+(jr+1)*g_rt] - vI0[kf+(jr)*g_rt])/rt_step -
+                    STerm);
+            }
+
+            // fix f boundary conditions
+            if (abs(modeM)%2)
+            {
+                // odd mode, u = 0
+                uRi[(jr)*g_rt] = 0.0;
+                uIi[(jr)*g_rt] = 0.0;
+                uRi[f_len-1+(jr)*g_rt] = 0.0;
+                uIi[f_len-1+(jr)*g_rt] = 0.0;
+            } else {
+                // even mode, dudf = 0
+                uRi[(jr)*g_rt] = uRi[1+(jr)*g_rt];
+                uIi[(jr)*g_rt] = uIi[1+(jr)*g_rt];
+                uRi[f_len-1+(jr)*g_rt] = uRi[f_len-2+(jr)*g_rt];
+                uIi[f_len-1+(jr)*g_rt] = uIi[f_len-2+(jr)*g_rt];
+            }
+        }
+        // step 2, calculate next fields
+        for (jr=1; jr<rt_len-1; jr++)
+        {
+            r_j0 = rphCoord->data[jr-1]; // r_j-1/2
+            // r_jh = rCoord->data[jr]; // r_j
+            r_j1 = rphCoord->data[jr]; // r_j+1/2
+            for (kf=1; kf < f_len-1; kf++)
+            {
+                f_k = fCoord->data[kf];
+                compute_TeukParams(&tp_j0, modeM, -2, r_j0, f_k, params->spin, 1.);
+                // compute_TeukParams(&tp_jh, modeM, -2, r_jh, f_k, params->spin, 1.);
+                compute_TeukParams(&tp_j1, modeM, -2, r_j1, f_k, params->spin, 1.);
+                DTerm = (tp_j0.bb + tp_j1.bb)/2.;
+                STerm = (vRi[kf + (jr-1)*g_rt] + vRi[kf + (jr)*g_rt])/2.;
+                uR1[kf+(jr)*g_rt] = uR0[kf+(jr)*g_rt] - 
+                    (t_step) * ( DTerm*(uRi[kf+(jr)*g_rt] - uRi[kf+(jr-1)*g_rt])/rt_step -
+                    STerm);
+                
+                STerm = (vIi[kf + (jr-1)*g_rt] + vIi[kf + (jr)*g_rt])/2.;
+                uI1[kf+(jr)*g_rt] = uI0[kf+(jr)*g_rt] - 
+                    (t_step) * ( DTerm*(uIi[kf+(jr)*g_rt] - uIi[kf+(jr-1)*g_rt])/rt_step -
+                    STerm);
+
+                duRdrt = (uRi[kf+(jr)*g_rt] - uRi[kf+(jr-1)*g_rt])/rt_step;
+                duIdrt = (uIi[kf+(jr)*g_rt] - uIi[kf+(jr-1)*g_rt])/rt_step;
+                // dudtheta
+                km2 = kf==1 ? kf : kf-2;
+                km1 = kf-1;
+                kp1 = kf+1;
+                kp2 = kf==f_len-2 ? kf : kf+2;
+
+                // next vR
+                Lder1_0 = (uRi[km2+(jr-1)*g_rt]-uRi[kp2+(jr-1)*g_rt] + 8.*(uRi[kp1+(jr-1)*g_rt]-uRi[km1+(jr-1)*g_rt]))/12./f_step;
+                Lder2_0 = (-uRi[kp2+(jr-1)*g_rt]-uRi[km2+(jr-1)*g_rt] +16.*(uRi[km1+(jr-1)*g_rt]+uRi[kp1+(jr-1)*g_rt])-30*uRi[kf+(jr-1)*g_rt])/12./f_step/f_step;
+                Lder1_1 = (uRi[km2+(jr)*g_rt]-uRi[kp2+(jr)*g_rt] + 8.*(uRi[kp1+(jr)*g_rt]-uRi[km1+(jr)*g_rt]))/12./f_step;
+                Lder2_1 = (-uRi[kp2+(jr)*g_rt]-uRi[km2+(jr)*g_rt] +16.*(uRi[km1+(jr)*g_rt]+uRi[kp1+(jr)*g_rt])-30*uRi[kf+(jr)*g_rt])/12./f_step/f_step;
+                TTerm = 0.0; //sourceless
+                LTerm = (tp_j0.lder1*Lder1_0 + tp_j1.lder1*Lder1_1)/2. + 
+                    (tp_j0.lder2*Lder2_0 + tp_j1.lder2*Lder2_1)/2.;
+                MTerm = (tp_j0.m31+tp_j1.m31) * duRdrt/2. + (tp_j0.m32+tp_j1.m32)*duIdrt/2.;
+                ATerm = ((tp_j0.a31*uRi[kf+(jr-1)*g_rt]+tp_j1.a31*uRi[kf+(jr)*g_rt]) + 
+                        (tp_j0.a32*uIi[kf+(jr-1)*g_rt]+tp_j1.a32*uIi[kf+(jr)*g_rt]) + 
+                        (tp_j0.a33*vRi[kf+(jr-1)*g_rt]+tp_j1.a33*vRi[kf+(jr)*g_rt]) + 
+                        (tp_j0.a34*vIi[kf+(jr-1)*g_rt]+tp_j1.a34*vIi[kf+(jr)*g_rt]))/2.;
+                STerm = TTerm - MTerm - LTerm - ATerm;
+                vR1[kf+(jr)*g_rt] = vR0[kf+(jr)*g_rt] - 
+                    (t_step) * ((-DTerm)*(vRi[kf+(jr)*g_rt] - vRi[kf+(jr-1)*g_rt])/rt_step -
+                    STerm);
+                
+                // next vI
+                Lder1_0 = (uIi[km2+(jr-1)*g_rt]-uIi[kp2+(jr-1)*g_rt] + 8.*(uIi[kp1+(jr-1)*g_rt]-uIi[km1+(jr-1)*g_rt]))/12./f_step;
+                Lder2_0 = (-uIi[kp2+(jr-1)*g_rt]-uIi[km2+(jr-1)*g_rt] +16.*(uIi[km1+(jr-1)*g_rt]+uIi[kp1+(jr-1)*g_rt])-30*uIi[kf+(jr-1)*g_rt])/12./f_step/f_step;
+                Lder1_1 = (uIi[km2+(jr)*g_rt]-uIi[kp2+(jr)*g_rt] + 8.*(uIi[kp1+(jr)*g_rt]-uIi[km1+(jr)*g_rt]))/12./f_step;
+                Lder2_1 = (-uIi[kp2+(jr)*g_rt]-uIi[km2+(jr)*g_rt] +16.*(uIi[km1+(jr)*g_rt]+uIi[kp1+(jr)*g_rt])-30*uIi[kf+(jr)*g_rt])/12./f_step/f_step;
+                TTerm = 0.0; //sourceless
+                LTerm = (tp_j0.lder1*Lder1_0 + tp_j1.lder1*Lder1_1)/2. + 
+                    (tp_j0.lder2*Lder2_0 + tp_j1.lder2*Lder2_1)/2.;
+                MTerm = -(tp_j0.m32+tp_j1.m32) * duRdrt/2. + (tp_j0.m31+tp_j1.m31)*duIdrt/2.;
+                ATerm = (-(tp_j0.a32*uRi[kf+(jr-1)*g_rt]+tp_j1.a32*uRi[kf+(jr)*g_rt]) + 
+                        (tp_j0.a31*uIi[kf+(jr-1)*g_rt]+tp_j1.a31*uIi[kf+(jr)*g_rt]) - 
+                        (tp_j0.a34*vRi[kf+(jr-1)*g_rt]+tp_j1.a34*vRi[kf+(jr)*g_rt]) + 
+                        (tp_j0.a33*vIi[kf+(jr-1)*g_rt]+tp_j1.a33*vIi[kf+(jr)*g_rt]))/2.;
+                STerm = TTerm - MTerm - LTerm - ATerm;
+                vI1[kf+(jr)*g_rt] = vI0[kf+(jr)*g_rt] - 
+                    (t_step) * ((-DTerm)*(vIi[kf+(jr)*g_rt] - vIi[kf+(jr-1)*g_rt])/rt_step -
+                    STerm);
+            }
+            // fix f boundary conditions
+            if (abs(modeM)%2)
+            {
+                // odd mode, u = 0
+                uR1[(jr)*g_rt] = 0.0;
+                uI1[(jr)*g_rt] = 0.0;
+                uR1[f_len-1+(jr)*g_rt] = 0.0;
+                uI1[f_len-1+(jr)*g_rt] = 0.0;
+            } else {
+                // even mode, dudf = 0
+                uR1[(jr)*g_rt] = uR1[1+(jr)*g_rt];
+                uI1[(jr)*g_rt] = uI1[1+(jr)*g_rt];
+                uR1[f_len-1+(jr)*g_rt] = uR1[f_len-2+(jr)*g_rt];
+                uI1[f_len-1+(jr)*g_rt] = uI1[f_len-2+(jr)*g_rt];
+            }
+        }
+        // fix r boundary conditions
+        // u,v(rt=rtmin) = 0 = u,v(rt=rtmax)
+        for (kf=0; kf<f_len; kf++)
+        {
+            uR1[kf] = 0.0;
+            uR1[kf + (rt_len-1) * g_rt] = 0.0;
+            uI1[kf] = 0.0;
+            uI1[kf + (rt_len-1) * g_rt] = 0.0;
+            vR1[kf] = 0.0;
+            vR1[kf + (rt_len-1) * g_rt] = 0.0;
+            vI1[kf] = 0.0;
+            vI1[kf + (rt_len-1) * g_rt] = 0.0;
+        }
+
+        // dump
+        if (time_i > time_thresh)
+        {
+            sprintf(fsave, "%s/status_time_mode%d_t%d.h5", params->prefix, modeM, time_thresh);
+            PRINT_LOG_INFO(LOG_INFO, "Dump to %s\n", fsave);
+            DumpREAL8ArrayTohdf5(fsave, "data", buffer, 1);
+            DumpREAL8ArrayTohdf5(fsave, "inter_data", inter, 0);
+            DumpREAL8ArrayTohdf5(fsave, "radius", rCoord, 0);
+            DumpREAL8ArrayTohdf5(fsave, "inter_radius", rphCoord, 0);
+            DumpREAL8ArrayTohdf5(fsave, "tortoise_radius", rtCoord, 0);
+            DumpREAL8ArrayTohdf5(fsave, "azimuth", fCoord, 0);
+            time_thresh += time_thresh_step;
+        }
+        uOutR[it] = uR1[iout_f + iout_rt * g_rt];
+        uOutI[it] = uI1[iout_f + iout_rt * g_rt];
+        memcpy(uR0, uR1, g_t * sizeof(REAL8));
+        memcpy(uI0, uI1, g_t * sizeof(REAL8));
+        memcpy(vR0, vR1, g_t * sizeof(REAL8));
+        memcpy(vI0, vI1, g_t * sizeof(REAL8));
+    }
+
+    sprintf(fsave, "%s/mode_%d.h5", params->prefix, modeM);
+    PRINT_LOG_INFO(LOG_INFO, "Dump to %s\n", fsave);
+    DumpREAL8ArrayTohdf5(fsave, "data", out, 1);
+    DumpREAL8ArrayTohdf5(fsave, "time", tCoord, 0);
+
+QUIT:
+    STRUCTFREE(buffer, REAL8Array);
+    STRUCTFREE(inter, REAL8Array);
+    STRUCTFREE(tCoord, REAL8Array);
+    STRUCTFREE(rtCoord, REAL8Array);
+    STRUCTFREE(rCoord, REAL8Array);
+    STRUCTFREE(rphCoord, REAL8Array);
+    STRUCTFREE(fCoord, REAL8Array);
+    STRUCTFREE(out, REAL8Array);
     return CEV_SUCCESS;
 }

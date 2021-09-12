@@ -28,6 +28,10 @@ INT usage(const CHAR *program)
 
     print_err("\t-r MASS-RATIO, --mass-ratio=MASS-RATIO\n\t\tmass ratio between secondary mass and central Kerr BH [%g]\n", DEFAULT_ETA);
 
+    print_err("\t-R STEP-RATIO, --step-ratio=STEP-RATIO\n\t\tratio between time step and radius step [%g]\n", DEFAULT_STEP_RATIO);
+    print_err("\t-T TIME-MAX, --time-max=TIME-MAX\n\t\tmax evolution time [%gM]\n", DEFAULT_TIME_MAX);
+    print_err("\t-S SHOT-STEP, --shot-step=TIME-MAX\n\t\ttime interval of save [%gM]\n", 50);
+
     print_err("\t-p PREFIX, --prefix=PREFIX\n\t\toutput path [TeukDefault]\n");
     print_err("\t-v VERSION, --version=VERSION\tVersion of code[1]\n\t\t\n");
     print_err("\t-E MODE --mode=MODE        \n\t\tThe output mode.\n");
@@ -44,11 +48,13 @@ CoreParams parseargs(INT argc, CHAR **argv, CtrlParams *ctpms)
     p.spin = DEFAULT_SPIN;
     p.eta = DEFAULT_ETA;
     p.mode = 0;
-    p.step_ratio = 0.6;
+    p.step_ratio = DEFAULT_STEP_RATIO;
+    p.t_max = DEFAULT_TIME_MAX;
     p.source_type = 0;
     p.rt0 = 20.;
     p.theta0 = CST_PI/4.;
     p.mode = 0;
+    p.shot_step = 50;
     SET_CODE_VERSION(1);
     extern CHAR *EXT_optarg;
     extern INT EXT_optind;
@@ -62,6 +68,10 @@ CoreParams parseargs(INT argc, CHAR **argv, CtrlParams *ctpms)
         {"spin", opt_required_argument, 0, 'a'},
         {"mass-ratio", opt_required_argument, 0, 'r'},
 
+        {"step-ratio", opt_required_argument, 0, 'R'},
+        {"time-max", opt_required_argument, 0, 'T'},
+        {"shot-step", opt_required_argument, 0, 'S'},
+
         {"prefix", opt_required_argument , 0, 'p'},
 
         {"mode", opt_required_argument, 0, 'E'},
@@ -72,7 +82,7 @@ CoreParams parseargs(INT argc, CHAR **argv, CtrlParams *ctpms)
     };
 
     CHAR args[] =
-    "h:s:m:a:r:p:E:v:l:o";
+    "h:s:m:a:r:R:T:p:E:v:l:o";
     while (1)
     {
         INT option_index = 0;
@@ -104,6 +114,15 @@ CoreParams parseargs(INT argc, CHAR **argv, CtrlParams *ctpms)
                 break;
             case 'r':
                 p.eta = atof(EXT_optarg);
+                break;
+            case 'R':
+                p.step_ratio = atof(EXT_optarg);
+                break;
+            case 'T':
+                p.t_max = atof(EXT_optarg);
+                break;
+            case 'S':
+                p.shot_step = atoi(EXT_optarg);
                 break;
             case 'p':
                 strncpy(p.prefix, EXT_optarg, STR_COMM_SIZE);
